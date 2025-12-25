@@ -12,11 +12,11 @@ from datetime import datetime
 
 sys.path.append(os.path.dirname(__file__))
 from config import (
-    LLM_MODEL, EMBED_MODEL, OLLAMA_BASE_URL,
-    USE_ROCM, USE_NPU, GPU_LAYERS, LLM_CONTEXT_WINDOW
+    LLM_MODEL, EMBED_MODEL, OLLAMA_BASE_URL
 )
 from query import initialize_rag_system, create_query_engine, format_response
-
+"""Removed  `USE_ROCM`, `USE_NPU`, `GPU_LAYERS`, or `LLM_CONTEXT_WINDOW` from "from config import(....." code portion above"""
+"""Also removed by commenting out in other places of the code (below)"""
 
 class Benchmark:
     """Benchmark suite for RAG system performance."""
@@ -30,10 +30,10 @@ class Benchmark:
                 "llm_model": LLM_MODEL,
                 "embed_model": EMBED_MODEL,
                 "ollama_url": OLLAMA_BASE_URL,
-                "use_rocm": USE_ROCM,
-                "use_npu": USE_NPU,
-                "gpu_layers": GPU_LAYERS,
-                "context_window": LLM_CONTEXT_WINDOW,
+                #"use_rocm": USE_ROCM,
+                #"use_npu": USE_NPU,
+                #"gpu_layers": GPU_LAYERS,
+                #"context_window": LLM_CONTEXT_WINDOW,
             },
             "tests": []
         }
@@ -251,13 +251,13 @@ def main():
     print(f"\nConfiguration:")
     print(f"  LLM Model: {LLM_MODEL}")
     print(f"  Embed Model: {EMBED_MODEL}")
-    print(f"  ROCm Enabled: {USE_ROCM}")
-    print(f"  NPU Enabled: {USE_NPU}")
-    print(f"  Context Window: {LLM_CONTEXT_WINDOW}")
+    #print(f"  ROCm Enabled: {USE_ROCM}")
+    #print(f"  NPU Enabled: {USE_NPU}")
+    #print(f"  Context Window: {LLM_CONTEXT_WINDOW}")
     
     benchmark = Benchmark(output_dir=args.output)
     
-    print("\n🔧 Initializing RAG system...")
+    print("\n Initializing RAG system...")
     index = initialize_rag_system()
     query_engine = create_query_engine(index)
     print("✓ RAG system ready")
