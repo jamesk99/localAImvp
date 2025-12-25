@@ -156,7 +156,7 @@ class Benchmark:
         print("=" * 60)
         
         print(f"\nTesting with query requiring large context...")
-        print(f"Configured context window: {LLM_CONTEXT_WINDOW} tokens")
+        # print(f"Configured context window: {LLM_CONTEXT_WINDOW} tokens")
         
         start_time = time.time()
         try:
@@ -173,7 +173,7 @@ class Benchmark:
             
             results = {
                 "test": "context_window",
-                "context_window_size": LLM_CONTEXT_WINDOW,
+                # "context_window_size": LLM_CONTEXT_WINDOW,
                 "latency_sec": round(latency, 2),
                 "sources_retrieved": num_sources,
                 "success": True
@@ -183,7 +183,7 @@ class Benchmark:
             print(f"   ✗ Error: {e}")
             results = {
                 "test": "context_window",
-                "context_window_size": LLM_CONTEXT_WINDOW,
+                # "context_window_size": LLM_CONTEXT_WINDOW,
                 "success": False,
                 "error": str(e)
             }
