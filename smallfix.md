@@ -107,21 +107,25 @@ If you do this, also consider increasing timeouts (see next item).
 ---
 
 ## 5) Increase timeouts for bigger models (prevents “random 500” failures)
+
 **Where:** `src/query.py`
 
 Current values:
+
 - primary: `request_timeout=180.0`
 - fallback: `request_timeout=120.0`
 
 On larger models (or CPU inference), these can be too low.
 
 **Suggested starting point on CPU-heavy inference:**
+
 - primary: `request_timeout=600.0`
 - fallback: `request_timeout=300.0`
 
 ---
 
 ## 6) Add streaming later (bigger UX win, small code change)
+
 **Where:** Flask endpoint `POST /api/query` in `src/app.py`.
 
 Right now, the endpoint blocks until `query_engine.query(question)` finishes.
@@ -130,13 +134,16 @@ Right now, the endpoint blocks until `query_engine.query(question)` finishes.
 This is one of the best UX improvements once you move to bigger/slower models.
 
 This requires modest code changes:
+
 - a streaming route in Flask
 - using Ollama streaming output (or LlamaIndex streaming if supported in your version)
 
 ---
 
 ## 7) Fix `benchmark.py` config mismatch (small maintenance fix)
+
 **Where:** `src/benchmark.py` imports:
+
 ```py
 from config import (
     LLM_MODEL, EMBED_MODEL, OLLAMA_BASE_URL,
@@ -148,12 +155,14 @@ But `src/config.py` currently **does not define** `USE_ROCM`, `USE_NPU`, `GPU_LA
 So `benchmark.py` will fail to run as-is.
 
 **Small fix options:**
+
 - Add those env vars to `src/config.py`, or
 - Remove those imports/prints from `benchmark.py`.
 
 ---
 
 ## Suggested “first hour” upgrade order
+
 1. Set `LLM_MODEL`/`LLM_FALLBACK` to a strong+small pairing.
 2. Increase `TOP_K` to 8 and bump `SIMILARITY_THRESHOLD` slightly if needed.
 3. Increase `request_timeout` to avoid timeouts on larger models.
@@ -161,8 +170,38 @@ So `benchmark.py` will fail to run as-is.
 
 ---
 
+## Missing Key Metrics
+
+Latency Test Issues:
+
+No per-query breakdown (only aggregates)
+Missing retrieval time vs generation time breakdown
+No standard deviation/variance metrics
+Missing percentile data (p50, p95, p99)
+No query complexity correlation
+Quality Test Issues:
+
+Only 2 test cases (insufficient sample size)
+No relevance scoring for individual sources
+Missing answer completeness metrics
+No diversity in source retrieval tracking
+No hallucination detection
+Context Window Test Issues:
+
+Single query only (no statistical validity)
+No token usage tracking
+Missing context utilization metrics
+Overall Gaps:
+
+No error rate tracking
+No memory usage monitoring
+No detailed per-query results (only summaries)
+Missing timestamp data for trend analysis
+
 ## What I need from you to fully tailor model picks
+
 Reply with:
+
 - Whether you have a **dedicated GPU** (and VRAM amount), or if this is **CPU-only** inference.
 - The exact Ollama models you already have installed (`ollama list`).
 
