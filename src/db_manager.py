@@ -10,6 +10,16 @@ from document_tracker import DocumentTracker
 from document_loaders import get_supported_extensions
 from config import TRACKING_DB_PATH, RAW_DOCS_DIR
 
+"""
+def _is_in_view_only_documents_dir(file_path: Path) -> bool:
+    project_root = Path(__file__).resolve().parent.parent
+    view_only_dir = (project_root / "assets" / "documents").resolve()
+    try:
+        file_path.resolve().relative_to(view_only_dir)
+        return True
+    except Exception:
+        return False
+"""
 
 def print_header(title):
     """Print a formatted header."""
@@ -63,6 +73,8 @@ def check_new_documents():
     files = []
     for pattern in file_patterns:
         files.extend(raw_path.glob(pattern))
+
+    # files = [p for p in files if not _is_in_view_only_documents_dir(p)]
     
     # Find new files
     new_files = []

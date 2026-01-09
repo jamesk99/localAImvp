@@ -1,0 +1,17 @@
+{
+  "metadata": {
+    "version": "1.0",
+    "description": "Infrastructure test queries for Tier 1 benchmarking",
+    "created": "2025-01-08",
+    "query_types": ["factual", "summary", "multi_hop", "analytical"]
+  },
+  "infrastructure_tests": [
+    {
+      "id": "inf_001",
+      "query": "What is backpropagation and how does it work in neural networks?",
+      "type": "factual",
+      "expected_tokens": 150,
+      "complexity": "medium"
+    }
+  ]
+}

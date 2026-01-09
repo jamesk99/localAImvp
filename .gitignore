@@ -23,6 +23,7 @@ data/vectordb/
 data/raw/*.pdf
 data/raw/*.txt
 data/raw/*.md
+data/raw/*.docx
 
 # Keep directory structure but ignore contents
 !data/raw/.gitkeep

@@ -215,6 +215,63 @@ python src/db_manager.py --verify
 python src/db_manager.py --check
 ```
 
+## Benchmarking
+
+The project includes an enhanced benchmark suite (`src/benchmarkv2.py`) for comprehensive RAG system evaluation.
+
+### Quick Start
+
+```bash
+# Run infrastructure metrics (Tier 1)
+python src/benchmarkv2.py --tier1
+
+# Run all benchmark tiers
+python src/benchmarkv2.py --all
+```
+
+### Benchmark Tiers
+
+| Tier | Name | Description |
+|------|------|-------------|
+| 1 | Infrastructure | Latency (p50/p95/p99), throughput, hardware utilization |
+| 2 | RAGAS Quality | Faithfulness, relevancy, context precision/recall |
+| 3 | Retrieval | Precision@K, Recall@K, MRR, NDCG |
+| 4 | Load Testing | Multi-user concurrent query performance |
+| 5 | Scale Testing | Large context windows, memory scaling |
+
+### CLI Options
+
+```bash
+python src/benchmarkv2.py --tier1              # Infrastructure metrics
+python src/benchmarkv2.py --tier2              # RAGAS quality (requires: pip install ragas datasets)
+python src/benchmarkv2.py --tier3              # Retrieval effectiveness
+python src/benchmarkv2.py --tier4              # Multi-user load testing
+python src/benchmarkv2.py --tier5              # Scale testing
+python src/benchmarkv2.py --all                # Run all tiers
+python src/benchmarkv2.py --tier1 --iterations 5  # Custom iterations
+python src/benchmarkv2.py --queries tests/queries/custom.json  # Custom query file
+```
+
+### Output
+
+Results are saved to `benchmarks/` as JSON files:
+
+- `benchmarks/tier1_infrastructure_YYYYMMDD_HHMMSS.json`
+- `benchmarks/tier2_ragas_YYYYMMDD_HHMMSS.json`
+- etc.
+
+### Test Query Files
+
+Test queries are stored in `tests/queries/`:
+
+- `infrastructure_test_set.json` - Infrastructure testing queries
+- `ragas_test_set.json` - RAGAS evaluation with ground truth
+- `retrieval_test_set.json` - Retrieval effectiveness queries
+
+See `tests/queries/README.md` for format details and customization.
+
+---
+
 ## Roadmap ideas
 
 - Stronger auth (sessions, hashed passwords, optional SSO)

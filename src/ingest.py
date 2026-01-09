@@ -19,6 +19,17 @@ from config import (
     CHUNK_SIZE, CHUNK_OVERLAP, EMBED_MODEL, OLLAMA_BASE_URL, TRACKING_DB_PATH
 )
 
+"""
+def _is_in_view_only_documents_dir(file_path: Path) -> bool:
+    project_root = Path(__file__).resolve().parent.parent
+    view_only_dir = (project_root / "assets" / "documents").resolve()
+    try:
+        file_path.resolve().relative_to(view_only_dir)
+        return True
+    except Exception:
+        return False
+"""
+
 def load_documents() -> List[Document]:
     """Load documents from the raw data directory, skipping already ingested ones."""
     documents = []
@@ -33,6 +44,8 @@ def load_documents() -> List[Document]:
     files = []
     for pattern in file_patterns:
         files.extend(raw_path.glob(pattern))
+
+    # files = [p for p in files if not _is_in_view_only_documents_dir(p)]
     
     if not files:
         print(f"  No documents found in {RAW_DOCS_DIR}")
