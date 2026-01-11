@@ -59,6 +59,8 @@ try:
     from ragas import evaluate
     from ragas.metrics import faithfulness, answer_relevancy, context_precision, context_recall
     from datasets import Dataset
+    from langchain_community.llms import Ollama as LangchainOllama
+    from langchain_community.embeddings import OllamaEmbeddings
     HAS_RAGAS = True
 except ImportError:
     HAS_RAGAS = False
@@ -161,10 +163,39 @@ class BenchmarkV2:
             self.index = initialize_rag_system()
             self.query_engine = create_query_engine(self.index)
             
-            # Create separate retriever for detailed timing measurements
+            # Create retriever matching production config
             self.retriever = VectorIndexRetriever(
                 index=self.index,
                 similarity_top_k=TOP_K,
+            )
+            
+            # Create node postprocessors matching production
+            self.node_postprocessors = [
+                SimilarityPostprocessor(similarity_cutoff=SIMILARITY_THRESHOLD)
+            ]
+            
+            # Create response synthesizer with SAME prompt as production (from query.py)
+            qa_prompt_template = (
+                "You are an AI assistant answering questions based on provided context documents.\n"
+                "Context information is below.\n"
+                "---------------------\n"
+                "{context_str}\n"
+                "---------------------\n"
+                "Given the context information above, answer the following question in a clear, comprehensive, and well-structured manner.\n"
+                "If the context doesn't contain enough information to fully answer the question, say so explicitly.\n"
+                "Provide specific details and examples from the context when possible.\n"
+                "Format your response with:\n"
+                "1. A direct answer to the question\n"
+                "2. Supporting details from the context\n"
+                "3. Any relevant implications or considerations\n\n"
+                "Question: {query_str}\n"
+                "Answer: "
+            )
+            self.qa_prompt = PromptTemplate(qa_prompt_template)
+            
+            self.response_synthesizer = get_response_synthesizer(
+                text_qa_template=self.qa_prompt,
+                response_mode="compact"
             )
             
             self._initialized = True
@@ -175,51 +206,97 @@ class BenchmarkV2:
         contexts = []
         if hasattr(response, 'source_nodes'):
             for node in response.source_nodes:
-                # Get full text, not truncated
                 full_text = node.node.text
                 contexts.append(full_text)
         return contexts
     
-    def _measure_component_latencies(self, query_text: str) -> Dict[str, float]:
+    def _execute_query_with_timing(self, query_text: str) -> Dict:
         """
-        Measure actual latency breakdown for embedding, retrieval, and generation.
-        Returns dict with embed_sec, retrieval_sec, generation_sec.
-        """
-        timings = {"embed_sec": 0, "retrieval_sec": 0, "generation_sec": 0}
+        Execute a single query with component timing.
+        This runs the query ONCE and measures each component SEPARATELY.
         
+        Uses the pre-computed query embedding for vector search to avoid
+        double-embedding and get accurate timing measurements.
+        
+        Returns dict with:
+            - response: The actual response object
+            - embedding_sec: Time to embed the query
+            - retrieval_sec: Time for vector search only (using pre-computed embedding)
+            - generation_sec: Time for LLM generation
+            - total_sec: Total end-to-end time
+            - nodes: Retrieved nodes
+        """
+        from llama_index.core import Settings as LlamaSettings
+        from llama_index.core.schema import NodeWithScore, QueryBundle
+        
+        result = {
+            "response": None,
+            "embedding_sec": 0,
+            "retrieval_sec": 0,
+            "generation_sec": 0,
+            "total_sec": 0,
+            "nodes": [],
+            "answer": ""
+        }
+        
+        total_start = time.time()
+        
+        # Step 1: Embedding - measure by calling embed model directly
+        embed_model = LlamaSettings.embed_model
+        embedding_start = time.time()
+        query_embedding = embed_model.get_query_embedding(query_text)
+        embedding_end = time.time()
+        result["embedding_sec"] = embedding_end - embedding_start
+        
+        # Step 2: Vector search - use pre-computed embedding to avoid re-embedding
+        # Create QueryBundle with the embedding we already computed
+        query_bundle = QueryBundle(query_str=query_text, embedding=query_embedding)
+        
+        retrieval_start = time.time()
+        # Use _retrieve which accepts QueryBundle with pre-computed embedding
+        nodes = self.retriever._retrieve(query_bundle)
+        retrieval_end = time.time()
+        result["retrieval_sec"] = retrieval_end - retrieval_start
+        result["nodes"] = nodes
+        
+        # Apply postprocessors (same as production)
+        for postprocessor in self.node_postprocessors:
+            nodes = postprocessor.postprocess_nodes(nodes, query_str=query_text)
+        
+        # Step 3: Generation using production response synthesizer
+        generation_start = time.time()
+        response = self.response_synthesizer.synthesize(query_text, nodes)
+        generation_end = time.time()
+        result["generation_sec"] = generation_end - generation_start
+        
+        total_end = time.time()
+        result["total_sec"] = total_end - total_start
+        result["response"] = response
+        result["answer"] = str(response)
+        
+        return result
+    
+    def _count_tokens(self, text: str) -> int:
+        """
+        Count tokens in text using the LLM's tokenizer if available,
+        otherwise fall back to approximation.
+        """
         try:
-            # Measure retrieval (includes embedding the query)
-            retrieval_start = time.time()
-            nodes = self.retriever.retrieve(query_text)
-            retrieval_end = time.time()
-            
-            # Retrieval time includes query embedding + vector search
-            # Estimate embedding as ~30% of retrieval, search as ~70%
-            total_retrieval = retrieval_end - retrieval_start
-            timings["embed_sec"] = total_retrieval * 0.3
-            timings["retrieval_sec"] = total_retrieval * 0.7
-            
-            # Now measure generation separately using the retrieved nodes
-            if nodes:
-                # Build context string from nodes
-                context_str = "\n\n".join([n.node.text for n in nodes])
-                
-                # Time the LLM generation
-                from llama_index.core import Settings as LlamaSettings
-                llm = LlamaSettings.llm
-                
-                prompt = f"Context:\n{context_str}\n\nQuestion: {query_text}\nAnswer: "
-                
-                gen_start = time.time()
-                _ = llm.complete(prompt)
-                gen_end = time.time()
-                
-                timings["generation_sec"] = gen_end - gen_start
-                
-        except Exception as e:
-            print(f"      (Component timing failed: {str(e)[:50]}...)")
+            from llama_index.core import Settings as LlamaSettings
+            llm = LlamaSettings.llm
+            # Try to use the model's tokenizer if available
+            if hasattr(llm, 'tokenizer') and llm.tokenizer is not None:
+                return len(llm.tokenizer.encode(text))
+            # Ollama models may have a different interface
+            if hasattr(llm, '_tokenizer') and llm._tokenizer is not None:
+                return len(llm._tokenizer.encode(text))
+        except Exception:
+            pass
         
-        return timings
+        # Fallback: approximate tokens as words * 1.3 (typical for English text)
+        # This is more accurate than just word count
+        word_count = len(text.split())
+        return int(word_count * 1.3)
     
     def _load_queries(self, query_file: str, key: str) -> List[Dict]:
         """Load test queries from JSON file."""
@@ -266,21 +343,22 @@ class BenchmarkV2:
     # =========================================================================
     
     def run_tier1_infrastructure(self, query_file: str = "tests/queries/infrastructure_test_set.json",
-                                  iterations: int = 3,
-                                  skip_component_timing: bool = False) -> Dict:
+                                  iterations: int = 3) -> Dict:
         """
         Tier 1: Enhanced infrastructure metrics with hardware monitoring.
         
+        Executes each query ONCE per iteration with integrated component timing.
+        No double query execution - timing is measured during actual pipeline execution.
+        
         Measures:
         - Query latency (mean, std, p50, p95, p99)
-        - Token throughput per query type
-        - Latency breakdown (embedding, retrieval, generation) - unless skip_component_timing=True
+        - Component breakdown (retrieval = embed+search, generation)
+        - Token throughput (tokens / generation_time)
         - Hardware utilization (CPU, memory, GPU)
         
         Args:
             query_file: Path to JSON file containing test queries
             iterations: Number of times to run each query (for statistical accuracy)
-            skip_component_timing: If True, skip detailed component breakdown (faster but less detailed)
         """
         print("\n" + "=" * 70)
         print("TIER 1: ENHANCED INFRASTRUCTURE METRICS")
@@ -296,8 +374,7 @@ class BenchmarkV2:
             return {"error": str(e)}
         
         print(f"\nLoaded {len(queries)} test queries")
-        print(f"Running {iterations} iterations per query")
-        print(f"Component timing: {'DISABLED' if skip_component_timing else 'ENABLED (all iterations)'}\n")
+        print(f"Running {iterations} iterations per query\n")
         
         # Start hardware monitoring
         hw_monitor = HardwareMonitor()
@@ -306,13 +383,12 @@ class BenchmarkV2:
         # Results storage
         all_latencies = []
         latencies_by_type = {"factual": [], "summary": [], "multi_hop": [], "analytical": []}
-        throughputs = []
         query_results = []
         
-        # Latency breakdown accumulators
-        embed_times = []
-        retrieval_times = []
-        generation_times = []
+        # Aggregate component timing accumulators
+        all_embedding_times = []
+        all_retrieval_times = []
+        all_generation_times = []
         
         for query_data in progress_bar(queries, desc="Testing queries"):
             query_id = query_data["id"]
@@ -321,31 +397,38 @@ class BenchmarkV2:
             
             print(f"\n[{query_id}] {query_text[:50]}...")
             
+            # Per-query accumulators
             iteration_latencies = []
             iteration_tokens = []
+            iteration_embedding = []
+            iteration_retrieval = []
+            iteration_generation = []
+            iteration_throughputs = []
             
             for i in range(iterations):
                 try:
-                    # Measure total query time
-                    start_total = time.time()
-                    response = self.query_engine.query(query_text)
-                    end_total = time.time()
-                    total_latency = end_total - start_total
+                    # Execute query ONCE with component timing (no double execution)
+                    timed_result = self._execute_query_with_timing(query_text)
                     
-                    # Format response to get sources
-                    result = format_response(response)
-                    answer = result["answer"]
-                    token_count = len(answer.split())
+                    answer = timed_result["answer"]
+                    total_latency = timed_result["total_sec"]
+                    embedding_time = timed_result["embedding_sec"]
+                    retrieval_time = timed_result["retrieval_sec"]
+                    generation_time = timed_result["generation_sec"]
+                    
+                    # Count tokens properly
+                    token_count = self._count_tokens(answer)
+                    
+                    # Throughput = tokens / generation_time (not total time)
+                    # This is the actual token generation rate
+                    throughput = token_count / generation_time if generation_time > 0 else 0
                     
                     iteration_latencies.append(total_latency)
                     iteration_tokens.append(token_count)
-                    
-                    # Measure actual component latencies for each iteration (unless disabled)
-                    if not skip_component_timing:
-                        component_times = self._measure_component_latencies(query_text)
-                        embed_times.append(component_times["embed_sec"])
-                        retrieval_times.append(component_times["retrieval_sec"])
-                        generation_times.append(component_times["generation_sec"])
+                    iteration_embedding.append(embedding_time)
+                    iteration_retrieval.append(retrieval_time)
+                    iteration_generation.append(generation_time)
+                    iteration_throughputs.append(throughput)
                     
                 except Exception as e:
                     print(f"   ✗ Iteration {i+1} failed: {e}")
@@ -355,45 +438,42 @@ class BenchmarkV2:
                 avg_latency = statistics.mean(iteration_latencies)
                 std_latency = statistics.stdev(iteration_latencies) if len(iteration_latencies) > 1 else 0
                 avg_tokens = statistics.mean(iteration_tokens)
-                throughput = avg_tokens / avg_latency if avg_latency > 0 else 0
+                avg_embedding = statistics.mean(iteration_embedding)
+                avg_retrieval = statistics.mean(iteration_retrieval)
+                avg_generation = statistics.mean(iteration_generation)
+                avg_throughput = statistics.mean(iteration_throughputs)
                 
                 all_latencies.extend(iteration_latencies)
+                all_embedding_times.extend(iteration_embedding)
+                all_retrieval_times.extend(iteration_retrieval)
+                all_generation_times.extend(iteration_generation)
+                
                 if query_type in latencies_by_type:
                     latencies_by_type[query_type].extend(iteration_latencies)
-                throughputs.append(throughput)
                 
                 query_result = {
                     "id": query_id,
                     "query": query_text,
                     "type": query_type,
-                    "latency_mean_sec": round(avg_latency, 3),
-                    "latency_std_sec": round(std_latency, 3),
+                    "iterations_completed": len(iteration_latencies),
+                    "latency": {
+                        "total_mean_sec": round(avg_latency, 3),
+                        "total_std_sec": round(std_latency, 3),
+                        "embedding_mean_sec": round(avg_embedding, 3),
+                        "embedding_std_sec": round(statistics.stdev(iteration_embedding), 3) if len(iteration_embedding) > 1 else 0,
+                        "retrieval_mean_sec": round(avg_retrieval, 3),
+                        "retrieval_std_sec": round(statistics.stdev(iteration_retrieval), 3) if len(iteration_retrieval) > 1 else 0,
+                        "generation_mean_sec": round(avg_generation, 3),
+                        "generation_std_sec": round(statistics.stdev(iteration_generation), 3) if len(iteration_generation) > 1 else 0,
+                    },
                     "tokens": round(avg_tokens, 1),
-                    "throughput_tokens_per_sec": round(throughput, 2),
-                    "iterations": len(iteration_latencies)
+                    "throughput_tokens_per_sec": round(avg_throughput, 2),
                 }
-                
-                # Add per-query component breakdown if component timing was enabled
-                if not skip_component_timing and embed_times and retrieval_times and generation_times:
-                    # Get the component times for this query (last N entries where N = iterations)
-                    n_iters = len(iteration_latencies)
-                    query_embed = embed_times[-n_iters:] if len(embed_times) >= n_iters else embed_times
-                    query_retrieval = retrieval_times[-n_iters:] if len(retrieval_times) >= n_iters else retrieval_times
-                    query_generation = generation_times[-n_iters:] if len(generation_times) >= n_iters else generation_times
-                    
-                    query_result["component_breakdown"] = {
-                        "embed_mean_sec": round(statistics.mean(query_embed), 3) if query_embed else 0,
-                        "embed_std_sec": round(statistics.stdev(query_embed), 3) if len(query_embed) > 1 else 0,
-                        "retrieval_mean_sec": round(statistics.mean(query_retrieval), 3) if query_retrieval else 0,
-                        "retrieval_std_sec": round(statistics.stdev(query_retrieval), 3) if len(query_retrieval) > 1 else 0,
-                        "generation_mean_sec": round(statistics.mean(query_generation), 3) if query_generation else 0,
-                        "generation_std_sec": round(statistics.stdev(query_generation), 3) if len(query_generation) > 1 else 0,
-                    }
                 
                 query_results.append(query_result)
                 
-                print(f"   ✓ Latency: {avg_latency:.2f}s (±{std_latency:.2f}s)")
-                print(f"   ✓ Throughput: {throughput:.2f} tokens/sec")
+                print(f"   ✓ Total: {avg_latency:.2f}s (embed: {avg_embedding:.3f}s, search: {avg_retrieval:.3f}s, gen: {avg_generation:.2f}s)")
+                print(f"   ✓ Throughput: {avg_throughput:.1f} tokens/sec (generation only)")
         
         # Stop hardware monitoring
         hw_stats = hw_monitor.stop()
@@ -405,6 +485,10 @@ class BenchmarkV2:
         for qtype, lats in latencies_by_type.items():
             if lats:
                 latency_by_type_stats[qtype] = round(statistics.mean(lats), 3)
+        
+        # Calculate aggregate throughput from query results
+        all_throughputs = [q["throughput_tokens_per_sec"] for q in query_results]
+        avg_throughput = statistics.mean(all_throughputs) if all_throughputs else 0
         
         # Build results
         results = {
@@ -420,34 +504,53 @@ class BenchmarkV2:
                 "num_queries": len(queries),
                 "iterations_per_query": iterations
             },
-            "results": {
-                "avg_latency_sec": round(statistics.mean(all_latencies), 3) if all_latencies else 0,
-                "std_latency_sec": round(statistics.stdev(all_latencies), 3) if len(all_latencies) > 1 else 0,
-                "p50_latency_sec": percentiles["p50"],
-                "p95_latency_sec": percentiles["p95"],
-                "p99_latency_sec": percentiles["p99"],
-                "min_latency_sec": round(min(all_latencies), 3) if all_latencies else 0,
-                "max_latency_sec": round(max(all_latencies), 3) if all_latencies else 0,
-                "avg_throughput_tokens_per_sec": round(statistics.mean(throughputs), 2) if throughputs else 0,
-                "latency_by_type": latency_by_type_stats,
-                "hardware": hw_stats,
-                "latency_breakdown": {
-                    "embedding_sec": round(statistics.mean(embed_times), 3) if embed_times else 0,
-                    "retrieval_sec": round(statistics.mean(retrieval_times), 3) if retrieval_times else 0,
-                    "generation_sec": round(statistics.mean(generation_times), 3) if generation_times else 0,
-                }
+            "aggregate_results": {
+                "total_latency": {
+                    "mean_sec": round(statistics.mean(all_latencies), 3) if all_latencies else 0,
+                    "std_sec": round(statistics.stdev(all_latencies), 3) if len(all_latencies) > 1 else 0,
+                    "p50_sec": percentiles["p50"],
+                    "p95_sec": percentiles["p95"],
+                    "p99_sec": percentiles["p99"],
+                    "min_sec": round(min(all_latencies), 3) if all_latencies else 0,
+                    "max_sec": round(max(all_latencies), 3) if all_latencies else 0,
+                },
+                "component_breakdown": {
+                    "embedding_mean_sec": round(statistics.mean(all_embedding_times), 3) if all_embedding_times else 0,
+                    "embedding_std_sec": round(statistics.stdev(all_embedding_times), 3) if len(all_embedding_times) > 1 else 0,
+                    "retrieval_mean_sec": round(statistics.mean(all_retrieval_times), 3) if all_retrieval_times else 0,
+                    "retrieval_std_sec": round(statistics.stdev(all_retrieval_times), 3) if len(all_retrieval_times) > 1 else 0,
+                    "generation_mean_sec": round(statistics.mean(all_generation_times), 3) if all_generation_times else 0,
+                    "generation_std_sec": round(statistics.stdev(all_generation_times), 3) if len(all_generation_times) > 1 else 0,
+                },
+                "throughput_tokens_per_sec": round(avg_throughput, 2),
+                "latency_by_query_type": latency_by_type_stats,
             },
-            "queries_tested": query_results
+            "hardware": hw_stats,
+            "per_query_results": query_results
         }
+        
+        # Calculate component percentages
+        total_time = results["aggregate_results"]["total_latency"]["mean_sec"]
+        if total_time > 0:
+            embed_pct = (results["aggregate_results"]["component_breakdown"]["embedding_mean_sec"] / total_time) * 100
+            retrieval_pct = (results["aggregate_results"]["component_breakdown"]["retrieval_mean_sec"] / total_time) * 100
+            generation_pct = (results["aggregate_results"]["component_breakdown"]["generation_mean_sec"] / total_time) * 100
+            results["aggregate_results"]["component_breakdown"]["embedding_percent"] = round(embed_pct, 1)
+            results["aggregate_results"]["component_breakdown"]["retrieval_percent"] = round(retrieval_pct, 1)
+            results["aggregate_results"]["component_breakdown"]["generation_percent"] = round(generation_pct, 1)
         
         # Print summary
         print("\n" + "-" * 70)
         print("TIER 1 SUMMARY")
         print("-" * 70)
         print(f"  Queries tested: {len(query_results)}")
-        print(f"  Average latency: {results['results']['avg_latency_sec']}s")
-        print(f"  P95 latency: {results['results']['p95_latency_sec']}s")
-        print(f"  Avg throughput: {results['results']['avg_throughput_tokens_per_sec']} tokens/sec")
+        print(f"  Total iterations: {len(all_latencies)}")
+        print(f"  Average total latency: {results['aggregate_results']['total_latency']['mean_sec']}s")
+        print(f"    - Embedding: {results['aggregate_results']['component_breakdown']['embedding_mean_sec']}s")
+        print(f"    - Vector search: {results['aggregate_results']['component_breakdown']['retrieval_mean_sec']}s")
+        print(f"    - Generation: {results['aggregate_results']['component_breakdown']['generation_mean_sec']}s")
+        print(f"  P95 latency: {results['aggregate_results']['total_latency']['p95_sec']}s")
+        print(f"  Throughput: {results['aggregate_results']['throughput_tokens_per_sec']} tokens/sec (generation phase)")
         print(f"  Peak CPU: {hw_stats['cpu']['peak_percent']}%")
         print(f"  Peak Memory: {hw_stats['memory']['peak_gb']} GB")
         
@@ -554,10 +657,23 @@ class BenchmarkV2:
                 "ground_truth": ground_truths
             })
             
-            # Run RAGAS evaluation
+            # Configure RAGAS to use Ollama (same as our pipeline) instead of OpenAI
+            ragas_llm = LangchainOllama(
+                model=LLM_MODEL,
+                base_url=OLLAMA_BASE_URL,
+                temperature=0.1,
+            )
+            ragas_embeddings = OllamaEmbeddings(
+                model=EMBED_MODEL,
+                base_url=OLLAMA_BASE_URL,
+            )
+            
+            # Run RAGAS evaluation with our local Ollama models
             scores = evaluate(
                 dataset,
-                metrics=[faithfulness, answer_relevancy, context_precision, context_recall]
+                metrics=[faithfulness, answer_relevancy, context_precision, context_recall],
+                llm=ragas_llm,
+                embeddings=ragas_embeddings,
             )
             
             # Convert to dict
@@ -884,6 +1000,13 @@ class BenchmarkV2:
             latencies = []
             errors = []
             
+            # NOTE (Issue 2 - Component Breakdown): This uses simple query_engine.query() which
+            # only measures total latency. To identify whether degradation is due to embedding
+            # contention, vector search contention, or LLM contention, would need to use
+            # _execute_query_with_timing() instead. However, that method creates its own
+            # retriever/synthesizer which may not be thread-safe. Future fix: make component
+            # timing thread-safe or add separate contention tests for each component.
+            
             def execute_query(query_text: str) -> Tuple[float, Optional[str]]:
                 """Execute a single query and return latency and error."""
                 try:
@@ -895,12 +1018,13 @@ class BenchmarkV2:
                     return 0, str(e)
             
             # Run concurrent queries
+            # Each user gets one query from the pool (round-robin assignment)
             with ThreadPoolExecutor(max_workers=num_users) as executor:
-                # Submit all queries
                 futures = []
-                for query in test_queries:
-                    for _ in range(num_users):
-                        futures.append(executor.submit(execute_query, query))
+                for user_idx in range(num_users):
+                    # Assign each user a query (cycling through available queries)
+                    query = test_queries[user_idx % len(test_queries)]
+                    futures.append(executor.submit(execute_query, query))
                 
                 # Collect results
                 for future in progress_bar(as_completed(futures), 
@@ -1053,9 +1177,24 @@ class BenchmarkV2:
                     SimilarityPostprocessor(similarity_cutoff=SIMILARITY_THRESHOLD)
                 ]
                 
-                qa_prompt = PromptTemplate(
-                    "Context:\n{context_str}\n\nQuestion: {query_str}\nAnswer: "
+                # Use SAME prompt as production (query.py) for accurate comparison
+                qa_prompt_template = (
+                    "You are an AI assistant answering questions based on provided context documents.\n"
+                    "Context information is below.\n"
+                    "---------------------\n"
+                    "{context_str}\n"
+                    "---------------------\n"
+                    "Given the context information above, answer the following question in a clear, comprehensive, and well-structured manner.\n"
+                    "If the context doesn't contain enough information to fully answer the question, say so explicitly.\n"
+                    "Provide specific details and examples from the context when possible.\n"
+                    "Format your response with:\n"
+                    "1. A direct answer to the question\n"
+                    "2. Supporting details from the context\n"
+                    "3. Any relevant implications or considerations\n\n"
+                    "Question: {query_str}\n"
+                    "Answer: "
                 )
+                qa_prompt = PromptTemplate(qa_prompt_template)
                 
                 response_synthesizer = get_response_synthesizer(
                     text_qa_template=qa_prompt,
@@ -1081,7 +1220,9 @@ class BenchmarkV2:
                 
                 result = format_response(response)
                 latency = end_time - start_time
-                token_count = len(result["answer"].split())
+                # Use same token estimation as Tier 1 (Ollama doesn't expose tokenizer)
+                # Approximation: words * 1.3 is typical for English text with subword tokenization
+                token_count = self._count_tokens(result["answer"])
                 actual_chunks = len(result["sources"])
                 
                 context_results.append({
@@ -1155,6 +1296,10 @@ class BenchmarkV2:
         latency_scaling = {}
         memory_scaling = {}
         
+        # NOTE (Issue 3 - Scaling Baseline): The baseline (5 chunks) matches production TOP_K=5,
+        # so the 5-chunk result IS your production baseline. Scaling multipliers are relative to
+        # production config. If TOP_K changes in config.py, this baseline changes too.
+        # Consider parameterizing baseline_chunks or always using a fixed reference point.
         if len(successful) >= 2:
             base = successful[0]
             for r in successful[1:]:
@@ -1242,8 +1387,6 @@ Examples:
                         help='Output directory for results (default: benchmarks)')
     parser.add_argument('--iterations', type=int, default=3,
                         help='Iterations per query for Tier 1 (default: 3)')
-    parser.add_argument('--skip-component-timing', action='store_true',
-                        help='Skip detailed component timing breakdown (faster but less detailed)')
     
     args = parser.parse_args()
     
@@ -1271,8 +1414,7 @@ Examples:
         query_file = args.queries or "tests/queries/infrastructure_test_set.json"
         benchmark.run_tier1_infrastructure(
             query_file, 
-            iterations=args.iterations,
-            skip_component_timing=args.skip_component_timing
+            iterations=args.iterations
         )
     
     if args.all or args.tier2:
