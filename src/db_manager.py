@@ -1,7 +1,3 @@
-"""
-This is the database management utility for tracking our database.
-Provides commands to view, verify, and manage our document tracking database.
-"""
 import os
 import sys
 from pathlib import Path

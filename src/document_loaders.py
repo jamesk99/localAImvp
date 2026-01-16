@@ -1,7 +1,3 @@
-"""
-Document loaders for various file formats.
-Each loader extracts text content from a specific file type.
-"""
 import os
 from pathlib import Path
 from typing import Optional, Dict, Any

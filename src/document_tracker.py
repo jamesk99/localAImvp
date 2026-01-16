@@ -1,4 +1,3 @@
-# src/document_tracker.py
 import sqlite3
 import hashlib
 from pathlib import Path
